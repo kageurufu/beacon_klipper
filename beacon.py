@@ -110,9 +110,6 @@ class BeaconProbe:
         self.printer.lookup_object("pins").register_chip("probe", self)
         # Register event handlers
         self.printer.register_event_handler("klippy:connect", self._handle_connect)
-        self.printer.register_event_handler(
-            "klippy:mcu_identify", self._handle_mcu_identify
-        )
         self._mcu.register_config_callback(self._build_config)
         self._mcu.register_response(self._handle_beacon_data, "beacon_data")
 
@@ -174,19 +171,6 @@ class BeaconProbe:
         if self.model:
             self._apply_threshold()
 
-    def _handle_mcu_identify(self):
-        constants = self._mcu.get_constants()
-
-        self._mcu_freq = self._mcu._mcu_freq
-
-        self.inv_adc_max = 1.0 / constants.get("ADC_MAX")
-        self.temp_smooth_count = constants.get("BEACON_ADC_SMOOTH_COUNT")
-        self.thermistor = thermistor.Thermistor(10000.0, 0.0)
-        self.thermistor.setup_coefficients_beta(25.0, 47000.0, 4101.0)
-
-        self.toolhead = self.printer.lookup_object("toolhead")
-        self.trapq = self.toolhead.get_trapq()
-
     def _build_config(self):
         self.beacon_stream_cmd = self._mcu.lookup_command(
             "beacon_stream en=%u", cq=self.cmd_queue
@@ -208,6 +192,17 @@ class BeaconProbe:
         )
 
         constants = self._mcu.get_constants()
+
+        self._mcu_freq = self._mcu._mcu_freq
+
+        self.inv_adc_max = 1.0 / constants.get("ADC_MAX")
+        self.temp_smooth_count = constants.get("BEACON_ADC_SMOOTH_COUNT")
+        self.thermistor = thermistor.Thermistor(10000.0, 0.0)
+        self.thermistor.setup_coefficients_beta(25.0, 47000.0, 4101.0)
+
+        self.toolhead = self.printer.lookup_object("toolhead")
+        self.trapq = self.toolhead.get_trapq()
+
         if constants.get("BEACON_HAS_ACCEL", 0) == 1:
             logging.info("Enabling Beacon accelerometer")
             if self.accel_helper is None:
@@ -1455,7 +1450,7 @@ class BeaconEndstopWrapper:
         self._trsyncs = [MCU_trsync(self.beacon._mcu, self._trdispatch)]
 
         printer = self.beacon.printer
-        printer.register_event_handler("klippy:mcu_identify", self._handle_mcu_identify)
+        beacon._mcu.register_config_callback(self._build_config)
         printer.register_event_handler(
             "homing:home_rails_begin", self._handle_home_rails_begin
         )
@@ -1466,7 +1461,7 @@ class BeaconEndstopWrapper:
         self.z_homed = False
         self.is_homing = False
 
-    def _handle_mcu_identify(self):
+    def _build_config(self):
         self.toolhead = self.beacon.printer.lookup_object("toolhead")
         kin = self.toolhead.get_kinematics()
         for stepper in kin.get_steppers():
@@ -1671,12 +1666,6 @@ class BeaconMeshHelper:
             desc=self.cmd_BED_MESH_CALIBRATE_help,
         )
 
-        if self.overscan < 0:
-            printer = self.beacon.printer
-            printer.register_event_handler(
-                "klippy:mcu_identify", self._handle_mcu_identify
-            )
-
     cmd_BED_MESH_CALIBRATE_help = "Perform Mesh Bed Leveling"
 
     def cmd_BED_MESH_CALIBRATE(self, gcmd):
@@ -1689,36 +1678,36 @@ class BeaconMeshHelper:
     def _handle_connect(self):
         self.exclude_object = self.beacon.printer.lookup_object("exclude_object", None)
 
-    def _handle_mcu_identify(self):
-        # Auto determine a safe overscan amount
-        toolhead = self.beacon.printer.lookup_object("toolhead")
-        curtime = self.beacon.reactor.monotonic()
-        status = toolhead.get_kinematics().get_status(curtime)
-        xo = self.beacon.x_offset
-        yo = self.beacon.y_offset
-        settings = {
-            "x": {
-                "range": [self.def_min_x - xo, self.def_max_x - xo],
-                "machine": [status["axis_minimum"][0], status["axis_maximum"][0]],
-                "count": self.def_res_y,
-            },
-            "y": {
-                "range": [self.def_min_y - yo, self.def_max_y - yo],
-                "machine": [status["axis_minimum"][1], status["axis_maximum"][1]],
-                "count": self.def_res_x,
-            },
-        }[self.dir]
+        if self.overscan < 0:
+            # Auto determine a safe overscan amount
+            toolhead = self.beacon.printer.lookup_object("toolhead")
+            curtime = self.beacon.reactor.monotonic()
+            status = toolhead.get_kinematics().get_status(curtime)
+            xo = self.beacon.x_offset
+            yo = self.beacon.y_offset
+            settings = {
+                "x": {
+                    "range": [self.def_min_x - xo, self.def_max_x - xo],
+                    "machine": [status["axis_minimum"][0], status["axis_maximum"][0]],
+                    "count": self.def_res_y,
+                },
+                "y": {
+                    "range": [self.def_min_y - yo, self.def_max_y - yo],
+                    "machine": [status["axis_minimum"][1], status["axis_maximum"][1]],
+                    "count": self.def_res_x,
+                },
+            }[self.dir]
 
-        r = settings["range"]
-        m = settings["machine"]
-        space = (r[1] - r[0]) / (float(settings["count"] - 1))
-        self.overscan = min(
-            [
-                max(0, r[0] - m[0]),
-                max(0, m[1] - r[1]),
-                space + 2.0,  # A half circle with 2mm lead in/out
-            ]
-        )
+            r = settings["range"]
+            m = settings["machine"]
+            space = (r[1] - r[0]) / (float(settings["count"] - 1))
+            self.overscan = min(
+                [
+                    max(0, r[0] - m[0]),
+                    max(0, m[1] - r[1]),
+                    space + 2.0,  # A half circle with 2mm lead in/out
+                ]
+            )
 
     def _generate_path(self):
         xo = self.beacon.x_offset
@@ -2103,8 +2092,12 @@ class BeaconMeshHelper:
         for r in self.faulty_regions:
             r_xmin = max(0, int(math.ceil((r.x_min - self.min_x) / self.step_x)))
             r_ymin = max(0, int(math.ceil((r.y_min - self.min_y) / self.step_y)))
-            r_xmax = min(self.res_x-1, int(math.floor((r.x_max - self.min_x) / self.step_x)))
-            r_ymax = min(self.res_y-1, int(math.floor((r.y_max - self.min_y) / self.step_y)))
+            r_xmax = min(
+                self.res_x - 1, int(math.floor((r.x_max - self.min_x) / self.step_x))
+            )
+            r_ymax = min(
+                self.res_y - 1, int(math.floor((r.y_max - self.min_y) / self.step_y))
+            )
             for y in range(r_ymin, r_ymax + 1):
                 for x in range(r_xmin, r_xmax + 1):
                     mask[(y, x)] = False
