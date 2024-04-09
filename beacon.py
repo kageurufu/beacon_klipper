@@ -106,6 +106,12 @@ class BeaconProbe:
         self.cmd_queue = self._mcu.alloc_command_queue()
         self.mcu_probe = BeaconEndstopWrapper(self)
 
+        self.beacon_stream_cmd = None
+        self.beacon_set_threshold = None
+        self.beacon_home_cmd = None
+        self.beacon_stop_home_cmd = None
+        self.beacon_nvm_read_cmd = None
+
         # Register z_virtual_endstop
         self.printer.lookup_object("pins").register_chip("probe", self)
         # Register event handlers
@@ -158,18 +164,8 @@ class BeaconProbe:
         self.mod_axis_twist_comp = self.printer.lookup_object(
             "axis_twist_compensation", None
         )
-
-        # Ensure streaming mode is stopped
-        self.beacon_stream_cmd.send([0])
-        if self.accel_helper:
-            self.accel_helper._handle_connect()
-
-        self.model_temp = self.model_temp_builder.build_with_nvm(self)
-        if self.model_temp:
-            self.fmin = self.model_temp.fmin
-        self.model = self.models.get(self.default_model_name, None)
-        if self.model:
-            self._apply_threshold()
+        if self.model is None:
+            self.model = self.models.get(self.default_model_name, None)
 
     def _build_config(self):
         self.beacon_stream_cmd = self._mcu.lookup_command(
@@ -202,6 +198,25 @@ class BeaconProbe:
 
         self.toolhead = self.printer.lookup_object("toolhead")
         self.trapq = self.toolhead.get_trapq()
+
+        self.mcu_temp = BeaconMCUTempHelper.build_with_nvm(self)
+        self.model_temp = self.model_temp_builder.build_with_nvm(self)
+        if self.model_temp:
+            self.fmin = self.model_temp.fmin
+        if self.model is None:
+            self.model = self.models.get(self.default_model_name, None)
+        if self.model:
+            self._apply_threshold()
+
+        if self.beacon_stream_cmd is not None:
+            self.beacon_stream_cmd.send([1 if self._stream_en else 0])
+        if self._stream_en:
+            curtime = self.reactor.monotonic()
+            self.reactor.update_timer(
+                self._stream_timeout_timer, curtime + STREAM_TIMEOUT
+            )
+        else:
+            self.reactor.update_timer(self._stream_timeout_timer, self.reactor.NEVER)
 
         if constants.get("BEACON_HAS_ACCEL", 0) == 1:
             logging.info("Enabling Beacon accelerometer")
@@ -476,7 +491,8 @@ class BeaconProbe:
         self._update_thresholds()
         trigger_c = int(self.freq_to_count(self.trigger_freq))
         untrigger_c = int(self.freq_to_count(self.untrigger_freq))
-        self.beacon_set_threshold.send([trigger_c, untrigger_c])
+        if self.beacon_set_threshold is not None:
+            self.beacon_set_threshold.send([trigger_c, untrigger_c])
 
     def _register_model(self, name, model):
         if name in self.models:
@@ -2359,6 +2375,8 @@ class BeaconAccelHelper(object):
         self.accel_stream_cmd = self.beacon._mcu.lookup_command(
             "beacon_accel_stream en=%c scale=%c", cq=self.beacon.cmd_queue
         )
+        # Ensure streaming mode is stopped
+        self.accel_stream_cmd.send([0, 0])
 
         self._scales = self._fetch_scales(constants)
         self._scale = self._select_scale()
@@ -2409,10 +2427,6 @@ class BeaconAccelHelper(object):
         if scale is None:
             return {"name": "unknown", "id": 0, "scale": 1}
         return scale
-
-    def _handle_connect(self):
-        # Ensure streaming mode is stopped
-        self.accel_stream_cmd.send([0, 0])
 
     def _handle_accel_data(self, params):
         with self._sample_lock:
