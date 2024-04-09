@@ -199,7 +199,6 @@ class BeaconProbe:
         self.toolhead = self.printer.lookup_object("toolhead")
         self.trapq = self.toolhead.get_trapq()
 
-        self.mcu_temp = BeaconMCUTempHelper.build_with_nvm(self)
         self.model_temp = self.model_temp_builder.build_with_nvm(self)
         if self.model_temp:
             self.fmin = self.model_temp.fmin
