@@ -82,6 +82,14 @@ class BeaconProbe:
         self.contact_latency_min = config.getint("contact_latency_min", 0)
         self.contact_sensitivity = config.getint("contact_sensitivity", 0)
 
+        gcode_macro = self.printer.load_object(config, "gcode_macro")
+        self.tmpl_probe_activate = gcode_macro.load_template(
+            config, "probe_activate_gcode", ""
+        )
+        self.tmpl_probe_deactivate = gcode_macro.load_template(
+            config, "probe_deactivate_gcode", ""
+        )
+
         # Load models
         self.model = None
         self.models = {}
@@ -787,7 +795,11 @@ class BeaconProbe:
             self._current_probe = gcmd.get(
                 "PROBE_METHOD", self.default_probe_method
             ).lower()
-            return orig(gcmd)
+            self.tmpl_probe_activate.run_gcode_from_command()
+            try:
+                return orig(gcmd)
+            finally:
+                self.tmpl_probe_deactivate.run_gcode_from_command()
 
         self.gcode.register_command(cmd, cb)
 
